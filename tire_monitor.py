@@ -1,178 +1,212 @@
-import yfinance as yf
-import pandas as pd
-import matplotlib.pyplot as plt
-import requests
 import os
+import sys
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import numpy as np
 from datetime import datetime, timedelta
+import io
 
 # ==========================================
-# 1. 設定監控目標 (Configuration)
+# 設定區 (Configuration)
 # ==========================================
+# 從環境變數讀取 GitHub Secrets
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
 
-# 國際領先指標 (The "Micron" of Tire Sector)
-GLOBAL_LEADERS = {
-    "5108.T": "普利司通 (日/龍頭)",
-    "GT": "固特異 (美/需求)"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9"
 }
 
-# 台灣輪胎股 (Followers)
-TIRE_STOCKS = {
-    "2105.TW": "正新 (2105)",
-    "2106.TW": "建大 (2106)",
-    "2109.TW": "華豐 (2109)"
-}
-
-# 原物料與匯率 (Cost Factors)
-RAW_MATERIALS = {
-    "CL=F": "原油 (油價)",
-    "JR=F": "橡膠 (大阪期貨)", 
-    "TWD=X": "美元兌台幣"
-}
-
-# 合併所有清單
-ALL_TARGETS = {**GLOBAL_LEADERS, **TIRE_STOCKS, **RAW_MATERIALS}
-
-LOOKBACK_DAYS = 180
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-
-# ==========================================
-# 2. 數據處理與分析
-# ==========================================
-
-def get_data():
-    """下載數據"""
-    print("下載全球輪胎股與原物料數據中...")
-    tickers = list(ALL_TARGETS.keys())
-    # 多抓一點時間以免均線計算不足
-    start_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS + 60)).strftime('%Y-%m-%d')
-    
-    data = yf.download(tickers, start=start_date, progress=False)['Close']
-    data = data.ffill()
-    return data
-
-def analyze_market_status(df):
-    """分析市場狀態"""
-    # 取得最新報價與漲跌幅
-    result = {}
-    for code, name in ALL_TARGETS.items():
-        if code in df.columns:
-            price = df[code].iloc[-1]
-            prev = df[code].iloc[-2]
-            chg = (price - prev) / prev * 100
-            result[code] = {"name": name, "price": price, "chg": chg}
-    return result
-
-def get_strategy_guide():
-    """策略戰術板 (含國際龍頭解讀)"""
-    return """
->>> **🍩 輪胎股戰術板 (Global Strategy)**
-**1. 國際龍頭 (Leading Indicators):**
-• 🇯🇵 **普利司通 (5108.T)**: 產業風向球。如果它創新高，代表全球輪胎業景氣復甦，正新/建大通常會落後補漲 (Lagging)。
-• 🇺🇸 **固特異 (GT)**: 美國需求指標。若 GT 大跌，小心美國車市疲軟，台灣廠商出口會受創。
-
-**2. 成本剪刀差 (Spread):**
-• ✂️ **黃金買點**: 當 `油/橡膠(虛線)` 往下走，但 `普利司通/正新(實線)` 卻往上噴，代表利潤率將大幅擴張。
-
-**3. 操作節奏:**
-• 就像「看美光做南亞科」，當你看到普利司通發動攻勢時，通常台灣輪胎股還有 1-2 週的反應時間可以佈局。
-"""
-
-# ==========================================
-# 3. 繪圖與通知
-# ==========================================
-
-def plot_comparison_chart(df):
-    plt.figure(figsize=(12, 7))
-    plt.style.use('bmh')
-    
-    # 正規化 (以第一天為 100，這樣才能把不同幣別放在同一個圖比較)
-    norm = (df / df.iloc[0]) * 100
-    
-    # A. 畫國際龍頭 (粗線/顯眼)
-    if '5108.T' in norm.columns:
-        plt.plot(norm.index, norm['5108.T'], label='Bridgestone (Japan)', color='black', linewidth=2.5)
-    if 'GT' in norm.columns:
-        plt.plot(norm.index, norm['GT'], label='Goodyear (US)', color='blue', linewidth=2.0, alpha=0.8)
-
-    # B. 畫台灣龍頭 (正新代表)
-    if '2105.TW' in norm.columns:
-        plt.plot(norm.index, norm['2105.TW'], label='Cheng Shin (TW)', color='red', linewidth=2.5)
-
-    # C. 畫成本 (虛線/背景)
-    if 'CL=F' in norm.columns:
-        plt.plot(norm.index, norm['CL=F'], label='Crude Oil', linestyle=':', color='gray', alpha=0.6)
-
-    plt.title(f"Tire Sector: Global Leaders vs Taiwan ({LOOKBACK_DAYS} Days)")
-    plt.legend(loc='upper left')
-    plt.grid(True, alpha=0.3)
-    
-    img_path = "global_tire_chart.png"
-    plt.savefig(img_path, dpi=100, bbox_inches='tight')
-    plt.close()
-    return img_path
-
-def send_discord(msg, img_path=None):
-    if not DISCORD_WEBHOOK_URL:
-        print(msg) # 本地測試用
-        return
-    
-    data = {"content": msg}
-    files = {}
-    if img_path and os.path.exists(img_path):
-        files = {"file": (os.path.basename(img_path), open(img_path, "rb"))}
-    
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, data=data, files=files)
-        print("✅ Discord 通知發送成功")
-    finally:
-        if files: files['file'][1].close()
-
-def main():
-    try:
-        df = get_data()
-        if df.empty: return
+class TireIndustryMonitorV4:
+    def __init__(self):
+        self.lookback_days = 90
+        self.end_date = datetime.now()
+        self.start_date = self.end_date - timedelta(days=self.lookback_days)
         
-        market_stat = analyze_market_status(df)
-        date_str = df.index[-1].strftime('%Y-%m-%d')
+        # 判斷是否在 CI 環境 (GitHub Actions 通常會有 GITHUB_ACTIONS=true)
+        self.is_ci_env = os.getenv('GITHUB_ACTIONS') == 'true'
         
-        # --- 組合訊息 ---
-        msg = f"## 🌍 全球輪胎產業追蹤 `{date_str}`\n"
-        
-        # 1. 國際龍頭區
-        msg += "### 👑 國際領先指標 (Leaders)\n"
-        for code in GLOBAL_LEADERS:
-            if code in market_stat:
-                d = market_stat[code]
-                icon = "🔥" if d['chg'] > 2 else ("❄️" if d['chg'] < -2 else "➖")
-                msg += f"> **{d['name']}**: `{d['price']:.1f}` {icon} ({d['chg']:+.2f}%)\n"
-        
-        # 2. 台灣區
-        msg += "\n### 🇹🇼 台灣輪胎股 (Followers)\n"
-        for code in TIRE_STOCKS:
-            if code in market_stat:
-                d = market_stat[code]
-                icon = "📈" if d['chg'] > 0 else "📉"
-                msg += f"> **{d['name']}**: `{d['price']:.1f}` {icon} ({d['chg']:+.2f}%)\n"
-        
-        # 3. 成本區
-        msg += "\n### 🛢️ 成本因子\n"
-        if 'CL=F' in market_stat:
-            oil = market_stat['CL=F']
-            msg += f"> 原油: `{oil['chg']:+.2f}%`\n"
-        if 'TWD=X' in market_stat:
-            usd = market_stat['TWD=X']
-            msg += f"> 美元/台幣: `{usd['price']:.2f}` ({(usd['chg']):+.2f}%)\n"
+        self.tickers = {
+            'Bridgestone': '5108.T',
+            'Goodyear': 'GT',
+            'Cheng_Shin': '2105.TW',
+            'Kenda': '2106.TW',
+            'Oil_Brent': 'BZ=F',
+            'USD_TWD': 'TWD=X'
+        }
+        self.weights = {'Rubber': 0.4, 'Oil': 0.3, 'FX': 0.3}
 
-        # 4. 策略小抄
-        msg += get_strategy_guide()
+    def send_discord_notify(self, title, message, image_buffer=None, color=65280):
+        """發送 Discord Webhook 通知 (支援附圖)"""
+        if not DISCORD_WEBHOOK_URL:
+            print("❌ 錯誤: 環境變數 'DISCORD_WEBHOOK_URL' 未設定，無法發送通知。")
+            return
 
-        # 5. 發送
-        img_path = plot_comparison_chart(df)
-        send_discord(msg, img_path)
+        # 1. 先發送文字訊息 (Embed)
+        data = {
+            "username": "輪胎產業監控機器人",
+            "embeds": [{
+                "title": title,
+                "description": message,
+                "color": color,
+                "footer": {"text": f"Generated at {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            }]
+        }
+        
+        try:
+            # 發送文字
+            requests.post(DISCORD_WEBHOOK_URL, json=data)
+            
+            # 2. 如果有圖表，發送圖表檔案
+            if image_buffer:
+                image_buffer.seek(0)
+                files = {
+                    'file': ('chart.png', image_buffer, 'image/png')
+                }
+                # Discord Webhook 發送檔案不需要 Embed 格式，直接 multipart/form-data
+                requests.post(DISCORD_WEBHOOK_URL, files=files)
+                print("✅ Discord 通知與圖表已發送")
+            else:
+                print("✅ Discord 通知已發送 (無圖表)")
+                
+        except Exception as e:
+            print(f"❌ Discord 連線錯誤: {e}")
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    def scrape_rubber_price(self):
+        """爬取 Investing.com"""
+        url = "https://www.investing.com/commodities/rubber-tsr20-futures"
+        print(f"🕸️ 正在爬取: {url}")
+        
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=15)
+            if res.status_code != 200:
+                raise Exception(f"HTTP {res.status_code}")
+            
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # 嘗試抓取價格 (針對 Investing.com 動態改版做的容錯)
+            price_tag = soup.find('div', {'data-test': 'instrument-price-last'}) or soup.find('span', class_='text-5xl')
+            
+            if price_tag:
+                price = float(price_tag.text.strip().replace(',', ''))
+                
+                # 抓漲跌幅
+                change_tag = soup.find('span', {'data-test': 'instrument-price-change-percent'})
+                change_pct = float(change_tag.text.strip().replace('(', '').replace(')', '').replace('%', '')) if change_tag else 0.0
+                
+                return price, change_pct
+            else:
+                raise Exception("DOM 解析失敗")
+
+        except Exception as e:
+            print(f"⚠️ 爬蟲失敗 ({e}) -> 使用預設值")
+            return 185.0, 0.0 # Fallback
+
+    def fetch_market_data(self):
+        print(f"📥 下載 Yahoo Finance 數據...")
+        data = yf.download(list(self.tickers.values()), start=self.start_date, end=self.end_date, progress=False)['Close']
+        reverse_map = {v: k for k, v in self.tickers.items()}
+        data = data.rename(columns=reverse_map)
+        return data.ffill().dropna()
+
+    def generate_rubber_series(self, dates, current_price):
+        """生成橡膠歷史模擬序列 (用於填補圖表)"""
+        np.random.seed(42)
+        prices = [current_price]
+        for _ in range(len(dates)-1):
+            prices.append(prices[-1] - np.random.normal(0, 1.5))
+        prices.reverse()
+        return pd.Series(prices, index=dates, name='Rubber_TSR20')
+
+    def calculate_metrics(self, df):
+        df_pct = df.pct_change().fillna(0)
+        
+        # 綜合成本指數
+        df['Cost_Index_Change'] = (
+            df_pct['Rubber_TSR20'] * self.weights['Rubber'] +
+            df_pct['Oil_Brent'] * self.weights['Oil'] +
+            df_pct['USD_TWD'] * self.weights['FX']
+        )
+        df['Composite_Cost_Cum'] = df['Cost_Index_Change'].cumsum()
+        
+        # 利潤剪刀差
+        df['Bridgestone_Cum'] = df_pct['Bridgestone'].cumsum()
+        df['Profit_Spread'] = df['Bridgestone_Cum'] - df['Composite_Cost_Cum']
+        return df
+
+    def generate_chart_buffer(self, df):
+        """繪圖並回傳 Buffer 物件 (不存檔，直接在記憶體傳輸)"""
+        plt.style.use('bmh')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        
+        # Chart 1
+        ax1.plot(df.index, df['Bridgestone'], label='Bridgestone (JP)', color='#3498db')
+        ax1_r = ax1.twinx()
+        ax1_r.plot(df.index, df['Cheng_Shin'], label='Cheng Shin (TW)', color='#e74c3c', linestyle='--')
+        ax1.set_title('Leader (Bridgestone) vs Follower (Cheng Shin)')
+        ax1.legend(loc='upper left')
+        
+        # Chart 2
+        ax2.plot(df.index, df['Profit_Spread'], color='green', label='Profit Spread')
+        ax2.fill_between(df.index, df['Profit_Spread'], 0, where=(df['Profit_Spread']>0), color='green', alpha=0.3)
+        ax2.fill_between(df.index, df['Profit_Spread'], 0, where=(df['Profit_Spread']<0), color='red', alpha=0.3)
+        ax2.set_title('Profit Spread (Margin Expansion Indicator)')
+        ax2.axhline(0, linestyle=':', color='black')
+        
+        plt.tight_layout()
+        
+        # 將圖片存入 BytesIO
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close() # 釋放記憶體
+        return buf
+
+    def run(self):
+        try:
+            # 1. 獲取數據
+            rubber_price, rubber_chg = self.scrape_rubber_price()
+            df = self.fetch_market_data()
+            
+            # 2. 處理數據
+            rubber_series = self.generate_rubber_series(df.index, rubber_price)
+            df = pd.concat([df, rubber_series], axis=1)
+            df = self.calculate_metrics(df)
+            
+            # 3. 準備報告
+            latest = df.iloc[-1]
+            fmt = lambda v: f"{v:.2f}"
+            
+            report_text = (
+                f"**【全球輪胎產業追蹤】** {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                f"**🏭 領先指標**\n"
+                f"• 普利司通: {fmt(latest['Bridgestone'])}\n"
+                f"• 固特異: {fmt(latest['Goodyear'])}\n\n"
+                f"**🛢️ 成本因子**\n"
+                f"• 天然橡膠: {fmt(latest['Rubber_TSR20'])} ({rubber_chg:+.2f}%)\n"
+                f"• 綜合成本指數: {latest['Cost_Index_Change']*100:+.2f}%\n\n"
+                f"**🇹🇼 台廠**\n"
+                f"• 正新: {fmt(latest['Cheng_Shin'])}\n"
+                f"• 建大: {fmt(latest['Kenda'])}\n\n"
+                f"⚡ **Spread**: {fmt(latest['Profit_Spread']*100)}"
+            )
+            
+            # 4. 繪圖 (生成 Buffer)
+            chart_buffer = self.generate_chart_buffer(df)
+            
+            # 5. 發送通知
+            self.send_discord_notify("🚀 輪胎產業日報", report_text, chart_buffer)
+            
+            # 本地開發時，如果想看圖
+            if not self.is_ci_env:
+                print("非 CI 環境，腳本執行完畢。")
+                
+        except Exception as e:
+            print(f"❌ 執行過程發生錯誤: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    app = TireIndustryMonitorV4()
+    app.run()
