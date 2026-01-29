@@ -23,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11'
           cache: 'pip' # 啟用快取，讓下次安裝套件更快
 
       # 3. 安裝必要的套件
