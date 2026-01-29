@@ -1,31 +1,25 @@
-name: Daily Tire Strategy Tracker
+name: Daily Tire Monitor
 
 on:
   schedule:
-    # 台灣時間週一至週五 07:15 執行
-    - cron: '15 23 * * 0-4'
+    - cron: '30 0 * * 1-5' # 每天 UTC 00:30 (台灣時間 08:30)
   workflow_dispatch:
 
 jobs:
-  track_and_notify:
+  run-monitor:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
+      - uses: actions/checkout@v3
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
-          # ❌ 移除了原本這裡的 cache: 'pip'，因為這需要 requirements.txt 檔案
-          # 這樣修改後就不會報錯了
-
+          python-version: '3.11'
+          
       - name: Install dependencies
-        run: |
-          pip install yfinance pandas matplotlib requests
-
-      - name: Run Tire Monitor
+        run: pip install pandas yfinance matplotlib requests beautifulsoup4
+        
+      - name: Run Monitor Script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python tire_monitor.py
