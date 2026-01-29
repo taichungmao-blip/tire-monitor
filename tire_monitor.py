@@ -19,7 +19,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 }
 
-class TireIndustryMonitorV6:
+class TireIndustryMonitorV7:
     def __init__(self):
         self.lookback_days = 90
         self.end_date = datetime.now()
@@ -27,8 +27,8 @@ class TireIndustryMonitorV6:
         self.is_ci_env = os.getenv('GITHUB_ACTIONS') == 'true'
         
         self.tickers = {
-            'Bridgestone': '5108.T', # 價格領先指標
-            'Goodyear': 'GT',        # 美國需求指標
+            'Bridgestone': '5108.T',
+            'Goodyear': 'GT',
             'Cheng_Shin': '2105.TW',
             'Kenda': '2106.TW',
             'Oil_Brent': 'BZ=F',
@@ -61,32 +61,27 @@ class TireIndustryMonitorV6:
             print(f"❌ 發送失敗: {e}")
 
     def scrape_rubber_price(self):
-        """爬取 Investing.com 天然橡膠"""
         url = "https://www.investing.com/commodities/rubber-tsr20-futures"
         try:
             res = requests.get(url, headers=HEADERS, timeout=15)
             if res.status_code != 200: raise Exception(f"HTTP {res.status_code}")
-            
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 抓價格
             price_tag = soup.find('div', {'data-test': 'instrument-price-last'}) or soup.find('span', class_='text-5xl')
-            
             if price_tag:
                 price = float(price_tag.text.strip().replace(',', ''))
-                # 抓漲跌幅
                 change_tag = soup.find('span', {'data-test': 'instrument-price-change-percent'})
                 change_pct = float(change_tag.text.strip().replace('(', '').replace(')', '').replace('%', '')) if change_tag else 0.0
                 return price, change_pct
             else:
                 raise Exception("DOM Changed")
         except:
-            print("⚠️ 橡膠爬取失敗，使用備援數據")
-            return 185.0, 0.0 # Fallback
+            return 185.0, 0.0
 
     def fetch_market_data(self):
+        # 這裡不進行 ffill，保留 NaN 以便後續判斷真實收盤日
         data = yf.download(list(self.tickers.values()), start=self.start_date, end=self.end_date, progress=False)['Close']
         reverse_map = {v: k for k, v in self.tickers.items()}
-        return data.rename(columns=reverse_map).ffill().dropna()
+        return data.rename(columns=reverse_map)
 
     def generate_rubber_series(self, dates, current_price):
         np.random.seed(42)
@@ -96,19 +91,23 @@ class TireIndustryMonitorV6:
         return pd.Series(prices, index=dates, name='Rubber_TSR20')
 
     def calculate_metrics(self, df):
-        df_pct = df.pct_change().fillna(0)
-        df['Cost_Index_Change'] = (df_pct['Rubber_TSR20']*0.4 + df_pct['Oil_Brent']*0.3 + df_pct['USD_TWD']*0.3)
-        df['Composite_Cost_Cum'] = df['Cost_Index_Change'].cumsum()
-        df['Bridgestone_Cum'] = df_pct['Bridgestone'].cumsum()
-        df['Profit_Spread'] = df['Bridgestone_Cum'] - df['Composite_Cost_Cum']
-        df['Spread_Slope'] = df['Profit_Spread'].diff(5) 
-        return df
+        # 為了畫圖連續性，這裡產生一個 copy 做 ffill，但不影響原始 df 的數值判讀
+        df_chart = df.copy().ffill()
+        
+        df_pct = df_chart.pct_change().fillna(0)
+        df_chart['Cost_Index_Change'] = (df_pct['Rubber_TSR20']*0.4 + df_pct['Oil_Brent']*0.3 + df_pct['USD_TWD']*0.3)
+        df_chart['Composite_Cost_Cum'] = df_chart['Cost_Index_Change'].cumsum()
+        df_chart['Bridgestone_Cum'] = df_pct['Bridgestone'].cumsum()
+        df_chart['Profit_Spread'] = df_chart['Bridgestone_Cum'] - df_chart['Composite_Cost_Cum']
+        df_chart['Spread_Slope'] = df_chart['Profit_Spread'].diff(5) 
+        
+        return df, df_chart # 回傳兩個：原始含 NaN 的 (做報告用) 和 填補過的 (畫圖用)
 
-    def analyze_strategy(self, df):
-        latest = df.iloc[-1]
+    def analyze_strategy(self, df_chart):
+        latest = df_chart.iloc[-1]
         spread = latest['Profit_Spread']
         slope = latest['Spread_Slope']
-        leader_trend = latest['Bridgestone'] > df.iloc[-5]['Bridgestone']
+        leader_trend = latest['Bridgestone'] > df_chart.iloc[-5]['Bridgestone']
 
         if spread > 0 and slope > 0 and leader_trend:
             return "🟢 **積極買進**", "利潤擴大 + 龍頭領漲", 65280
@@ -119,22 +118,37 @@ class TireIndustryMonitorV6:
         else:
             return "⚪ **中立震盪**", "無明確方向", 12370112
 
-    def generate_chart_buffer(self, df):
+    def get_real_latest_data(self, df, col_name):
+        """
+        [關鍵修正]
+        獲取該欄位「最後一個非 NaN」的真實數據與漲跌幅
+        解決 ffill 導致的 0.00% 問題
+        """
+        valid_series = df[col_name].dropna()
+        if len(valid_series) < 2:
+            return 0.0, 0.0, "N/A"
+        
+        latest_price = valid_series.iloc[-1]
+        prev_price = valid_series.iloc[-2]
+        change_pct = (latest_price - prev_price) / prev_price * 100
+        last_date = valid_series.index[-1].strftime('%m/%d')
+        
+        return latest_price, change_pct, last_date
+
+    def generate_chart_buffer(self, df_chart):
         plt.style.use('bmh')
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
         
-        # 上圖：普利司通 vs 正新
-        ax1.plot(df.index, df['Bridgestone'], label='Bridgestone (Leader)', color='#3498db')
+        ax1.plot(df_chart.index, df_chart['Bridgestone'], label='Bridgestone (Leader)', color='#3498db')
         ax1_r = ax1.twinx()
-        ax1_r.plot(df.index, df['Cheng_Shin'], label='Cheng Shin (Follower)', color='#e74c3c', linestyle='--')
+        ax1_r.plot(df_chart.index, df_chart['Cheng_Shin'], label='Cheng Shin (Follower)', color='#e74c3c', linestyle='--')
         ax1.set_title('Leader-Lag: Bridgestone vs Cheng Shin')
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1_r.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
         
-        # 下圖：剪刀差
-        ax2.plot(df.index, df['Profit_Spread'], color='green', label='Profit Spread')
-        ax2.fill_between(df.index, df['Profit_Spread'], 0, where=(df['Profit_Spread']>0), color='green', alpha=0.3)
+        ax2.plot(df_chart.index, df_chart['Profit_Spread'], color='green', label='Profit Spread')
+        ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, where=(df_chart['Profit_Spread']>0), color='green', alpha=0.3)
         ax2.set_title('Profit Spread (Green Area = Buy Zone)')
         ax2.axhline(0, linestyle=':', color='black')
         
@@ -147,55 +161,63 @@ class TireIndustryMonitorV6:
 
     def run(self):
         try:
-            # 1. 數據處理
             rubber_price, rubber_chg = self.scrape_rubber_price()
-            df = self.fetch_market_data()
-            rubber_series = self.generate_rubber_series(df.index, rubber_price)
-            df = pd.concat([df, rubber_series], axis=1)
-            df = self.calculate_metrics(df)
+            df_raw = self.fetch_market_data() # 原始資料，含 NaN
             
-            # 2. 準備變數
-            latest = df.iloc[-1]
-            prev = df.iloc[-2]
-            def fmt(val): return f"{val:.2f}"
-            def pct(col): 
-                val = (latest[col] - prev[col]) / prev[col] * 100
-                return f"{val:+.2f}%"
+            # 畫圖用的 DF 需填充
+            rubber_series = self.generate_rubber_series(df_raw.index, rubber_price)
+            df_raw = pd.concat([df_raw, rubber_series], axis=1)
+            
+            # 分別處理報告用(df_raw) 與 畫圖用(df_chart)
+            df_raw, df_chart = self.calculate_metrics(df_raw)
+            
+            signal, reason, color = self.analyze_strategy(df_chart)
 
-            # 3. 策略分析
-            signal, reason, color = self.analyze_strategy(df)
+            # 輔助函數：顯示數據與日期
+            def get_fmt(col):
+                if col == 'Rubber_TSR20': 
+                    # 橡膠比較特殊，是爬蟲抓的單點
+                    return f"{rubber_price:.2f} ({rubber_chg:+.2f}%)"
+                
+                price, pct, date_str = self.get_real_latest_data(df_raw, col)
+                # 如果日期不是今天，標註一下日期
+                date_suffix = "" if date_str == datetime.now().strftime('%m/%d') else f" [{date_str}]"
+                return f"{price:.2f} ({pct:+.2f}%){date_suffix}"
 
-            # 4. 組裝完整報告 (含 Goodyear 與 橡膠細節)
+            # 綜合成本直接用 chart 的最新值即可 (因為是合成指標)
+            cost_change = df_chart['Cost_Index_Change'].iloc[-1] * 100
+            spread_val = df_chart['Profit_Spread'].iloc[-1] * 100
+
             report_text = (
                 f"**【輪胎產業戰術日報】** {datetime.now().strftime('%Y-%m-%d')}\n\n"
                 f"🎯 **策略訊號: {signal}**\n"
                 f"📝 **理由**: {reason}\n\n"
                 
-                f"**🇺🇸 國際領先/需求指標**\n"
-                f"• 普利司通: {fmt(latest['Bridgestone'])} ({pct('Bridgestone')}) - *風向球*\n"
-                f"• 固特異 (GT): {fmt(latest['Goodyear'])} ({pct('Goodyear')}) - *美市需求*\n\n"
+                f"**🇺🇸 國際指標**\n"
+                f"• 普利司通: {get_fmt('Bridgestone')}\n"
+                f"• 固特異: {get_fmt('Goodyear')}\n\n"
                 
-                f"**🛢️ 成本因子 (Cost Drivers)**\n"
-                f"• 天然橡膠: {fmt(latest['Rubber_TSR20'])} ({rubber_chg:+.2f}%) - *重要*\n"
-                f"• 原油 (Brent): {fmt(latest['Oil_Brent'])} ({pct('Oil_Brent')})\n"
-                f"• 綜合成本變化: **{latest['Cost_Index_Change']*100:+.2f}%**\n\n"
+                f"**🛢️ 成本因子**\n"
+                f"• 天然橡膠: {get_fmt('Rubber_TSR20')}\n"
+                f"• 原油: {get_fmt('Oil_Brent')}\n"
+                f"• 綜合成本變化: **{cost_change:+.2f}%**\n\n"
                 
                 f"**🇹🇼 台股監控**\n"
-                f"• 正新: {fmt(latest['Cheng_Shin'])} ({pct('Cheng_Shin')})\n"
-                f"• 建大: {fmt(latest['Kenda'])} ({pct('Kenda')})\n\n"
+                f"• 正新: {get_fmt('Cheng_Shin')}\n"
+                f"• 建大: {get_fmt('Kenda')}\n\n"
                 
-                f"📊 **利潤剪刀差 (Spread): {fmt(latest['Profit_Spread']*100)}**\n"
-                f"(圖表說明: 紅虛線=正新, 綠色區域=潛在利潤)"
+                f"📊 **Spread: {spread_val:.2f}**"
             )
             
-            # 5. 發送
-            chart_buffer = self.generate_chart_buffer(df)
+            chart_buffer = self.generate_chart_buffer(df_chart)
             self.send_discord_notify(f"🚀 {signal.split('**')[1]} - 輪胎監控", report_text, color, chart_buffer)
             
         except Exception as e:
             print(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
 if __name__ == "__main__":
-    app = TireIndustryMonitorV6()
+    app = TireIndustryMonitorV7()
     app.run()
