@@ -2,47 +2,30 @@ name: Daily Tire Strategy Tracker
 
 on:
   schedule:
-    # 說明: 
-    # UTC 23:15 = 台灣時間 07:15 (+8時區)
-    # 星期 0-4 (週日到週四) = 台灣日期的 週一到週五
-    # 這樣設定是為了趕在台股 07:30 之前取得國際盤資訊
+    # 台灣時間週一至週五 07:15 執行
     - cron: '15 23 * * 0-4'
-    
-  workflow_dispatch: # 允許在 GitHub 網頁上手動點擊 "Run workflow" 按鈕測試
+  workflow_dispatch:
 
 jobs:
   track_and_notify:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 下載你的程式碼
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2. 設定 Python 環境
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          cache: 'pip' # 啟用快取，讓下次安裝套件更快
+          python-version: '3.9'
+          # ❌ 移除了原本這裡的 cache: 'pip'，因為這需要 requirements.txt 檔案
+          # 這樣修改後就不會報錯了
 
-      # 3. 安裝必要的套件
       - name: Install dependencies
         run: |
           pip install yfinance pandas matplotlib requests
 
-      # 4. 執行 輪胎股監控程式 (請確保你的 Python 檔名是 tire_monitor.py)
       - name: Run Tire Monitor
         env:
-          # 從 GitHub Secrets 讀取 Discord Webhook
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python tire_monitor.py
-
-      # ====================================================
-      # 如果你也想在同一個時間一起執行「金屬/銅價監控」，
-      # 請確保你的 Repo 裡有 metal_monitor.py，並取消下面幾行的註解 (#)
-      # ====================================================
-      # - name: Run Metal Monitor
-      #   env:
-      #     DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      #   run: python metal_monitor.py
