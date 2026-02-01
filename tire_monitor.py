@@ -123,32 +123,46 @@ class TireIndustryMonitorV7:
         last_date = valid_series.index[-1].strftime('%m/%d')
         return latest_price, change_pct, last_date
 
-    def generate_chart_buffer(self, df_chart):
+   def generate_chart_buffer(self, df_chart):
         """
-        [更新] 加入 Goodyear 與 Kenda 並使用百分比對齊
+        [強化版] 確保 Bridgestone 顯示，並處理數據缺失問題
         """
         plt.style.use('bmh')
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10))
         
-        # 標準化處理 (以第一天為基準 0%)
+        # 標準化處理 (以第一天為基準 0%)，加入檢查避免除以 0 或全空
         def normalize(series):
+            if series.isnull().all() or series.iloc[0] == 0:
+                return series.fillna(0) # 避免報錯
             return (series / series.iloc[0] - 1) * 100
 
         # --- 上圖：全球與台股對比 ---
-        # 國際領頭羊 (實線)
-        ax1.plot(df_chart.index, normalize(df_chart['Bridgestone']), label='Bridgestone (JP)', color='#3498db', linewidth=2)
-        ax1.plot(df_chart.index, normalize(df_chart['Goodyear']), label='Goodyear (US)', color='#f1c40f', linewidth=2)
+        # 繪圖順序調整：先畫台股虛線，最後畫 Bridgestone 實線，確保它在最上層 (zorder)
         
-        # 台股跟隨者 (虛線)
-        ax1.plot(df_chart.index, normalize(df_chart['Cheng_Shin']), label='Cheng Shin (TW)', color='#e74c3c', linestyle='--', alpha=0.8)
-        ax1.plot(df_chart.index, normalize(df_chart['Kenda']), label='Kenda (TW)', color='#27ae60', linestyle='--', alpha=0.8)
+        # 1. 台股跟隨者 (zorder=2)
+        ax1.plot(df_chart.index, normalize(df_chart['Cheng_Shin']), 
+                 label='Cheng Shin (TW)', color='#e74c3c', linestyle='--', alpha=0.7, zorder=2)
+        ax1.plot(df_chart.index, normalize(df_chart['Kenda']), 
+                 label='Kenda (TW)', color='#27ae60', linestyle='--', alpha=0.7, zorder=2)
         
+        # 2. 國際領頭羊 (zorder=3)
+        ax1.plot(df_chart.index, normalize(df_chart['Goodyear']), 
+                 label='Goodyear (US)', color='#f1c40f', linewidth=2, zorder=3)
+        
+        # 3. 普利司通 (zorder=4) - 特別加粗並確保在最前面
+        bridgestone_norm = normalize(df_chart['Bridgestone'])
+        if not bridgestone_norm.isnull().all():
+            ax1.plot(df_chart.index, bridgestone_norm, 
+                     label='Bridgestone (JP)', color='#3498db', linewidth=2.5, zorder=4)
+        else:
+            print("⚠️ 警告: Bridgestone 數據為空，請檢查 yfinance 是否正常獲取 5108.T")
+
         ax1.set_title('Global Leaders vs. Taiwan Stocks (Normalized Performance %)')
         ax1.set_ylabel('Performance (%)')
-        ax1.legend(loc='upper left', fontsize='small', ncol=2) # 分兩欄顯示標籤避免擁擠
+        ax1.legend(loc='upper left', fontsize='small', ncol=2)
         ax1.axhline(0, color='black', linewidth=0.8, alpha=0.5)
         
-        # --- 下圖：利潤價差 ---
+        # --- 下圖：利潤價差 (維持不變) ---
         ax2.plot(df_chart.index, df_chart['Profit_Spread'], color='green', label='Profit Spread')
         ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, where=(df_chart['Profit_Spread']>0), color='green', alpha=0.2)
         ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, where=(df_chart['Profit_Spread']<0), color='red', alpha=0.2)
