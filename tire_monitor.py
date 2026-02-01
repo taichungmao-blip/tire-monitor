@@ -12,6 +12,7 @@ import io
 # ==========================================
 # 設定區
 # ==========================================
+# 請確保環境變數中已設定 DISCORD_WEBHOOK_URL
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
 
 HEADERS = {
@@ -19,13 +20,13 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 }
 
-class TireIndustryMonitorV7:
+class TireIndustryMonitorV8:
     def __init__(self):
         self.lookback_days = 90
         self.end_date = datetime.now()
         self.start_date = self.end_date - timedelta(days=self.lookback_days)
-        self.is_ci_env = os.getenv('GITHUB_ACTIONS') == 'true'
         
+        # 監控標的清單
         self.tickers = {
             'Bridgestone': '5108.T',
             'Goodyear': 'GT',
@@ -34,6 +35,7 @@ class TireIndustryMonitorV7:
             'Oil_Brent': 'BZ=F',
             'USD_TWD': 'TWD=X'
         }
+        # 成本權重設定
         self.weights = {'Rubber': 0.4, 'Oil': 0.3, 'FX': 0.3}
 
     def send_discord_notify(self, title, message, color, image_buffer=None):
@@ -61,6 +63,7 @@ class TireIndustryMonitorV7:
             print(f"❌ 發送失敗: {e}")
 
     def scrape_rubber_price(self):
+        """從 Investing.com 爬取天然橡膠期貨價格"""
         url = "https://www.investing.com/commodities/rubber-tsr20-futures"
         try:
             res = requests.get(url, headers=HEADERS, timeout=15)
@@ -75,14 +78,16 @@ class TireIndustryMonitorV7:
             else:
                 raise Exception("DOM Changed")
         except:
-            return 185.0, 0.0
+            return 185.0, 0.0 # 若爬蟲失效的保底值
 
     def fetch_market_data(self):
+        """下載各項金融數據"""
         data = yf.download(list(self.tickers.values()), start=self.start_date, end=self.end_date, progress=False)['Close']
         reverse_map = {v: k for k, v in self.tickers.items()}
         return data.rename(columns=reverse_map)
 
     def generate_rubber_series(self, dates, current_price):
+        """生成橡膠價格序列 (模擬過去走勢以供畫圖)"""
         np.random.seed(42)
         prices = [current_price]
         for _ in range(len(dates)-1): prices.append(prices[-1] - np.random.normal(0, 1.5))
@@ -90,16 +95,23 @@ class TireIndustryMonitorV7:
         return pd.Series(prices, index=dates, name='Rubber_TSR20')
 
     def calculate_metrics(self, df):
+        """計算核心策略指標"""
         df_chart = df.copy().ffill()
         df_pct = df_chart.pct_change().fillna(0)
+        
+        # 綜合成本指數
         df_chart['Cost_Index_Change'] = (df_pct['Rubber_TSR20']*0.4 + df_pct['Oil_Brent']*0.3 + df_pct['USD_TWD']*0.3)
         df_chart['Composite_Cost_Cum'] = df_chart['Cost_Index_Change'].cumsum()
+        
+        # 領頭羊利潤差 (Spread)
         df_chart['Bridgestone_Cum'] = df_pct['Bridgestone'].cumsum()
         df_chart['Profit_Spread'] = df_chart['Bridgestone_Cum'] - df_chart['Composite_Cost_Cum']
         df_chart['Spread_Slope'] = df_chart['Profit_Spread'].diff(5) 
+        
         return df, df_chart
 
     def analyze_strategy(self, df_chart):
+        """判斷買賣訊號"""
         latest = df_chart.iloc[-1]
         spread = latest['Profit_Spread']
         slope = latest['Spread_Slope']
@@ -115,79 +127,85 @@ class TireIndustryMonitorV7:
             return "⚪ **中立震盪**", "無明確方向", 12370112
 
     def get_real_latest_data(self, df, col_name):
+        """獲取該欄位最後一個非 NaN 的真實數據與漲跌幅"""
         valid_series = df[col_name].dropna()
         if len(valid_series) < 2: return 0.0, 0.0, "N/A"
+        
         latest_price = valid_series.iloc[-1]
         prev_price = valid_series.iloc[-2]
         change_pct = (latest_price - prev_price) / prev_price * 100
         last_date = valid_series.index[-1].strftime('%m/%d')
         return latest_price, change_pct, last_date
 
-   def generate_chart_buffer(self, df_chart):
+    def generate_chart_buffer(self, df_chart):
         """
-        [強化版] 確保 Bridgestone 顯示，並處理數據缺失問題
+        [更新] 包含 4 間輪胎廠，並確保 Bridgestone 顯示在最上層
         """
         plt.style.use('bmh')
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10))
         
-        # 標準化處理 (以第一天為基準 0%)，加入檢查避免除以 0 或全空
+        # 標準化函數：從 0% 開始比較
         def normalize(series):
             if series.isnull().all() or series.iloc[0] == 0:
-                return series.fillna(0) # 避免報錯
+                return series.fillna(0)
             return (series / series.iloc[0] - 1) * 100
 
-        # --- 上圖：全球與台股對比 ---
-        # 繪圖順序調整：先畫台股虛線，最後畫 Bridgestone 實線，確保它在最上層 (zorder)
-        
-        # 1. 台股跟隨者 (zorder=2)
+        # --- 上圖：全球與台股對比 (使用 zorder 控管層級) ---
+        # 1. 台股跟隨者 (先畫，放在下層 zorder=2)
         ax1.plot(df_chart.index, normalize(df_chart['Cheng_Shin']), 
                  label='Cheng Shin (TW)', color='#e74c3c', linestyle='--', alpha=0.7, zorder=2)
         ax1.plot(df_chart.index, normalize(df_chart['Kenda']), 
                  label='Kenda (TW)', color='#27ae60', linestyle='--', alpha=0.7, zorder=2)
         
-        # 2. 國際領頭羊 (zorder=3)
+        # 2. 國際領頭羊 - 固特異 (zorder=3)
         ax1.plot(df_chart.index, normalize(df_chart['Goodyear']), 
                  label='Goodyear (US)', color='#f1c40f', linewidth=2, zorder=3)
         
-        # 3. 普利司通 (zorder=4) - 特別加粗並確保在最前面
+        # 3. 國際領頭羊 - 普利司通 (最後畫，確保在最上層 zorder=4)
         bridgestone_norm = normalize(df_chart['Bridgestone'])
-        if not bridgestone_norm.isnull().all():
-            ax1.plot(df_chart.index, bridgestone_norm, 
-                     label='Bridgestone (JP)', color='#3498db', linewidth=2.5, zorder=4)
-        else:
-            print("⚠️ 警告: Bridgestone 數據為空，請檢查 yfinance 是否正常獲取 5108.T")
+        ax1.plot(df_chart.index, bridgestone_norm, 
+                 label='Bridgestone (JP)', color='#3498db', linewidth=2.5, zorder=4)
 
         ax1.set_title('Global Leaders vs. Taiwan Stocks (Normalized Performance %)')
         ax1.set_ylabel('Performance (%)')
         ax1.legend(loc='upper left', fontsize='small', ncol=2)
         ax1.axhline(0, color='black', linewidth=0.8, alpha=0.5)
         
-        # --- 下圖：利潤價差 (維持不變) ---
-        ax2.plot(df_chart.index, df_chart['Profit_Spread'], color='green', label='Profit Spread')
-        ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, where=(df_chart['Profit_Spread']>0), color='green', alpha=0.2)
-        ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, where=(df_chart['Profit_Spread']<0), color='red', alpha=0.2)
-        ax2.set_title('Strategy Profit Spread')
+        # --- 下圖：利潤價差 ---
+        ax2.plot(df_chart.index, df_chart['Profit_Spread'], color='green', label='Profit Spread', linewidth=1.5)
+        ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, 
+                         where=(df_chart['Profit_Spread'] > 0), color='green', alpha=0.2)
+        ax2.fill_between(df_chart.index, df_chart['Profit_Spread'], 0, 
+                         where=(df_chart['Profit_Spread'] < 0), color='red', alpha=0.2)
+        ax2.set_title('Strategy Profit Spread (Leader Return - Cost Index)')
         ax2.axhline(0, linestyle=':', color='black')
         ax2.legend(loc='upper left')
         
         plt.tight_layout()
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=110)
+        plt.savefig(buf, format='png', dpi=115)
         buf.seek(0)
         plt.close()
         return buf
 
     def run(self):
         try:
+            # 1. 取得數據
             rubber_price, rubber_chg = self.scrape_rubber_price()
             df_raw = self.fetch_market_data()
+            
+            # 2. 整合橡膠與計算指標
             rubber_series = self.generate_rubber_series(df_raw.index, rubber_price)
             df_raw = pd.concat([df_raw, rubber_series], axis=1)
             df_raw, df_chart = self.calculate_metrics(df_raw)
+            
+            # 3. 訊號分析
             signal, reason, color = self.analyze_strategy(df_chart)
 
+            # 4. 格式化報告文字
             def get_fmt(col):
-                if col == 'Rubber_TSR20': return f"{rubber_price:.2f} ({rubber_chg:+.2f}%)"
+                if col == 'Rubber_TSR20': 
+                    return f"{rubber_price:.2f} ({rubber_chg:+.2f}%)"
                 price, pct, date_str = self.get_real_latest_data(df_raw, col)
                 date_suffix = "" if date_str == datetime.now().strftime('%m/%d') else f" [{date_str}]"
                 return f"{price:.2f} ({pct:+.2f}%){date_suffix}"
@@ -209,11 +227,12 @@ class TireIndustryMonitorV7:
                 f"**🇹🇼 台股監控**\n"
                 f"• 正新: {get_fmt('Cheng_Shin')}\n"
                 f"• 建大: {get_fmt('Kenda')}\n\n"
-                f"📊 **Spread: {spread_val:.2f}**"
+                f"📊 **Spread (利潤空間): {spread_val:.2f}**"
             )
             
+            # 5. 生成圖表並發送通知
             chart_buffer = self.generate_chart_buffer(df_chart)
-            self.send_discord_notify(f"🚀 {signal.split('**')[1]} - 輪胎監控", report_text, color, chart_buffer)
+            self.send_discord_notify(f"🚀 {signal.split('**')[1]} - 輪胎產業監控", report_text, color, chart_buffer)
             
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -222,5 +241,5 @@ class TireIndustryMonitorV7:
             sys.exit(1)
 
 if __name__ == "__main__":
-    app = TireIndustryMonitorV7()
+    app = TireIndustryMonitorV8()
     app.run()
